@@ -4,7 +4,6 @@ from collections import namedtuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-import openai
 
 from llm_hpo import LLMOptimizer
 

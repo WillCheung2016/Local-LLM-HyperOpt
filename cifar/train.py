@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import time
 from typing import Tuple
 
@@ -11,7 +12,8 @@ from torch import nn
 from torch.optim import lr_scheduler
 from torch.utils import data
 import json
-from openai import OpenAI
+
+from ollama_client import OllamaChatClient
 
 from cifar.pipeline import construct_resnet9, get_cifar10_dataset
 from cifar.vit import ViT
@@ -19,21 +21,17 @@ from cifar.vit import ViT
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class LLMHyperparameterTuner:
-    """A class for tuning hyperparameters using a large language model (LLM).
-    
-    This implementation uses the OpenAI API to interact with the LLM and uses 
-    the compressed format prompting approach from "Using Large Language Models
-    for Hyperparameter Optimization".
-    """
+    """A class for tuning hyperparameters using a local Ollama LLM."""
     def __init__(
         self,
         initial_prompt: str,
-        model: str = 'gpt-4-1106-preview',
+        model: str = "llama3",
         temperature: float = 0.0,
         max_tokens: int = 1000,
         frequency_penalty: float = 0.0,
         seed: int = 0,
         round_digits: int = 4,
+        base_url: str | None = None,
     ):
         """Initialize the LLM hyperparameter tuner.
         
@@ -55,6 +53,7 @@ class LLMHyperparameterTuner:
         self.round_digits = round_digits
         self.configs = []  # Store history of configurations and their outcomes
         self.reset_messages()
+        self.client = OllamaChatClient(model=model, base_url=base_url)
         
     def reset_messages(self):
         """Reset the messages to the initial system message."""
@@ -74,15 +73,18 @@ class LLMHyperparameterTuner:
             prompt += f"Config {i+1}: {config} Error Rate: {error_rate:.{self.round_digits}e}, Loss: {loss:.{self.round_digits}e}\n"
         if error:
             prompt += f"We got the following error message with the previous proposal: {error}\n"
-        prompt += "Provide a config in the same JSON format."
+        prompt += "Provide only a JSON object with the recommended config and no additional commentary."
         return prompt
 
-    def parse_response(self, response):
-        hyperparameters_text = response.choices[0].message.content.strip()
+    def parse_response(self, response_text):
+        hyperparameters_text = response_text.strip()
         try:
             hyperparameters = json.loads(hyperparameters_text)
             return hyperparameters
         except json.JSONDecodeError as e:
+            json_match = re.search(r"\{.*\}", hyperparameters_text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
             raise ValueError(f"Failed to parse JSON response: {e}")
 
     def suggest_hyperparameters(self, max_retries=2, training_exception=None):
@@ -91,20 +93,17 @@ class LLMHyperparameterTuner:
             prompt = self.generate_prompt(error=training_exception)
             self.add_message("user", prompt)  # Log the user prompt
             try:
-                client = OpenAI()
                 print('sending messages:', len(self.messages))
                 print(self.messages[-1]['content'])
-                response = client.chat.completions.create(
-                    model=self.model,
-                    messages=self.messages,
+                response_text = self.client.chat(
+                    self.messages,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens,
+                    num_predict=self.max_tokens,
                     frequency_penalty=self.frequency_penalty,
                     seed=self.seed,
-                    response_format={"type": "json_object"},
                 )
-                hyperparameters = self.parse_response(response)
-                self.add_message("assistant", response.choices[0].message.content)  # Log the parsed response
+                hyperparameters = self.parse_response(response_text)
+                self.add_message("assistant", response_text)  # Log the parsed response
                 return hyperparameters
             except Exception as e:
                 print(e)
@@ -431,7 +430,7 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
-    # performs hyperparam search with GPT-4, check if already run
+    # performs hyperparameter search with an Ollama-hosted LLM, check if already run
     if args.llm:
         if not os.path.exists(args.save_dir):
             os.makedirs(args.save_dir)
