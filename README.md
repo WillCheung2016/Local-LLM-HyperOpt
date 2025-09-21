@@ -13,14 +13,18 @@ We explore the use of large language models (LLMs) in hyperparameter optimizatio
 `cifar/train.py` implements our method on CIFAR-10 and can be used to reproduce the results in our paper. The provide code demonstrates how to conduct our experiments with Vision Transformers and a small ResNet. The same prompt is used for both models in our experiments to make the tuning task more difficult.
 
 ### Setup
-Set up your OpenAI API credentials. You can also modify `LLMHyperparameterTuner` to call a different LLM.
+1. Install and start [Ollama](https://ollama.com/download) on the machine running the experiments.
+2. Pull the model you would like to use for hyper-parameter tuning, for example:
 
-```
-# Set up OpenAI API credentials: https://platform.openai.com/api-keys
-export OPENAI_API_KEY=(YOUR OPENAI API KEY)
-```
+   ```
+   ollama pull llama3
+   ```
 
-Install packages.
+3. (Optional) If Ollama is hosted on a different machine or port, set the `OLLAMA_HOST`
+   environment variable, e.g. `export OLLAMA_HOST="http://my-server:11434"`.
+
+Install the Python dependencies:
+
 ```
 pip install -r requirements.txt
 ```
