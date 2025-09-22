@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 class OllamaChatClient:
@@ -76,6 +76,28 @@ class OllamaChatClient:
         return options
 
     @staticmethod
+    def _extract_system_prompt(
+        messages: List[Dict[str, str]]
+    ) -> Tuple[Optional[str], List[Dict[str, str]]]:
+        """Split the system message from the rest of the conversation."""
+
+        system_segments: List[str] = []
+        filtered_messages: List[Dict[str, str]] = []
+        for message in messages:
+            if not message:
+                continue
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if not content:
+                continue
+            if role == "system":
+                system_segments.append(content)
+                continue
+            filtered_messages.append({"role": role, "content": content})
+        system_prompt = "\n\n".join(system_segments) if system_segments else None
+        return system_prompt, filtered_messages
+
+    @staticmethod
     def _format_messages(messages: List[Dict[str, str]]) -> str:
         """Format chat messages into a single prompt for the CLI."""
 
@@ -102,22 +124,27 @@ class OllamaChatClient:
     ) -> str:
         """Call the Ollama CLI with the given conversation history."""
 
-        prompt = self._format_messages(messages)
+        system_prompt, non_system_messages = self._extract_system_prompt(messages)
+        prompt = self._format_messages(non_system_messages)
         if not prompt.strip():
             raise ValueError("No content provided in messages for Ollama prompt.")
 
-        cmd = [self.executable, "run", self.model]
-        cmd.extend(self._build_options(
-            temperature=temperature,
-            num_predict=num_predict,
-            frequency_penalty=frequency_penalty,
-            seed=seed,
-        ))
-        cmd.append(prompt)
+        cmd = [self.executable, "run", self.model, "--json"]
+        cmd.extend(
+            self._build_options(
+                temperature=temperature,
+                num_predict=num_predict,
+                frequency_penalty=frequency_penalty,
+                seed=seed,
+            )
+        )
+        if system_prompt:
+            cmd.extend(["--system", system_prompt])
 
         try:
             process = subprocess.run(
                 cmd,
+                input=prompt,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -134,13 +161,27 @@ class OllamaChatClient:
         if not response_text:
             raise ValueError("Received empty response from Ollama CLI")
 
-        # ``ollama run`` may echo the prompt or include JSON fragments when
-        # templates are used. We try to return a clean assistant message.
-        cleaned = response_text.splitlines()
-        # Some models echo the final "Assistant:" prefix. Remove it if present.
-        if cleaned and cleaned[0].startswith("Assistant:"):
-            cleaned[0] = cleaned[0].replace("Assistant:", "", 1).strip()
-        result = "\n".join(line for line in cleaned if line).strip()
+        responses: List[str] = []
+        for line in response_text.splitlines():
+            payload_text = line.strip()
+            if not payload_text:
+                continue
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse JSON from Ollama output: {payload_text}"
+                ) from exc
+            if payload.get("error"):
+                raise RuntimeError(f"Ollama returned an error: {payload['error']}")
+            if "response" in payload and payload["response"]:
+                responses.append(payload["response"])
+            elif "message" in payload and isinstance(payload["message"], dict):
+                content = payload["message"].get("content")
+                if content:
+                    responses.append(content)
+
+        result = "".join(responses).strip()
         if not result:
             raise ValueError(
                 f"Unexpected Ollama response format: {json.dumps(response_text)}"
