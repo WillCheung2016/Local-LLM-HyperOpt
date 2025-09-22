@@ -120,12 +120,13 @@ class LLMHyperparameterTuner:
 
 def llm_hyperparameter_search(tuner, rounds=10):
     """Perform hyperparameter search using the LLM tuner."""
-    results = []  
+    results = []
     training_exception = None
     for i in range(rounds):
+        config = None
         try:
             config = tuner.suggest_hyperparameters(training_exception=training_exception)
-            validation_loss, validation_error = train_and_evaluate(config) 
+            validation_loss, validation_error = train_and_evaluate(config)
             tuner.update_configs(config, validation_error, validation_loss)
             # save and print results
             results.append({

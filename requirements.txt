@@ -1,7 +1,6 @@
 datasets
 numpy
 matplotlib
-requests
 torch
 torchvision
 einops
