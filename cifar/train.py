@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import argparse
+import json
 import logging
 import os
 import re
+import sys
 import time
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
@@ -11,7 +16,16 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import lr_scheduler
 from torch.utils import data
-import json
+
+if __package__ is None or __package__ == "":
+    # When executing the script directly (e.g. ``python cifar/train.py``), the
+    # project root is not on ``sys.path`` which prevents us from importing the
+    # shared Ollama client module. Adding it explicitly keeps the workflow
+    # simple while still allowing ``python -m cifar.train`` to function as
+    # before.
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
 
 from ollama_client import OllamaChatClient
 
@@ -170,6 +184,25 @@ def parse_args():
     parser.add_argument("--label_smoothing", type=float, default=0, help="Label smoothing to train the model.")
     parser.add_argument("--optimizer", type=str, default="SGD", help="Optimizer to use for training")
     parser.add_argument("--num_train_epochs", type=int, default=20, help="Total number of epochs to train the model.")
+    parser.add_argument(
+        "--max_train_batches",
+        type=int,
+        default=None,
+        help=(
+            "Optional limit on the number of training batches per epoch."
+            " Useful for quick smoke-tests to verify the pipeline without"
+            " running a full training epoch."
+        ),
+    )
+    parser.add_argument(
+        "--max_eval_batches",
+        type=int,
+        default=None,
+        help=(
+            "Optional limit on the number of evaluation batches."
+            " Applies to both the train and validation evaluations."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=1004, help="A seed for reproducible training pipeline.")
     args = parser.parse_args()
     return args
@@ -184,6 +217,7 @@ def train(
     optimizer: str = "SGD",
     arch: str = "resnet9",
     hyps: dict = None,
+    max_train_batches: int | None = None,
 ) -> nn.Module:
     """Train a model on the given dataset with the specified hyperparameters."""
     train_dataloader = data.DataLoader(
@@ -231,6 +265,8 @@ def train(
         raise ValueError("Invalid optimizer")
 
     iters_per_epoch = len(train_dataloader)
+    if max_train_batches is not None:
+        iters_per_epoch = min(iters_per_epoch, max_train_batches)
     lr_peak_epoch = num_train_epochs // 5
     # Linearly increase learning rate to peak at lr_peak_epoch, then decrease to 0 
     lr_schedule = np.interp(
@@ -244,6 +280,8 @@ def train(
     model.train()
     for epoch in range(num_train_epochs):
         total_loss = 0.0
+        batches_processed = 0
+        examples_seen = 0
         for batch in train_dataloader:
             model.zero_grad()
             inputs, labels = batch
@@ -254,14 +292,26 @@ def train(
             optimizer.step()
             scheduler.step()
             total_loss += loss.detach().float()
-        logging.info(f"Epoch {epoch + 1} - Averaged Loss: {total_loss / len(dataset)}")
+            batches_processed += 1
+            examples_seen += labels.size(0)
+            if max_train_batches is not None and batches_processed >= max_train_batches:
+                break
+        if examples_seen:
+            logging.info(
+                f"Epoch {epoch + 1} - Averaged Loss: {total_loss / examples_seen:.6f}"
+            )
     end_time = time.time()
     elapsed_time = end_time - start_time
     logging.info(f"Completed training in {elapsed_time:.2f} seconds.")
     return model
 
 
-def evaluate(model: nn.Module, dataset: data.Dataset, batch_size: int) -> Tuple[float, float]:
+def evaluate(
+    model: nn.Module,
+    dataset: data.Dataset,
+    batch_size: int,
+    max_batches: int | None = None,
+) -> Tuple[float, float]:
     dataloader = data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
@@ -271,6 +321,8 @@ def evaluate(model: nn.Module, dataset: data.Dataset, batch_size: int) -> Tuple[
 
     model.eval()
     total_loss, total_correct = 0.0, 0
+    batches_processed = 0
+    examples_seen = 0
     for batch in dataloader:
         with torch.no_grad():
             inputs, labels = batch
@@ -279,8 +331,15 @@ def evaluate(model: nn.Module, dataset: data.Dataset, batch_size: int) -> Tuple[
             loss = F.cross_entropy(outputs, labels, reduction="sum")
             total_loss += loss.detach().float()
             total_correct += outputs.detach().argmax(1).eq(labels).sum()
+            batches_processed += 1
+            examples_seen += labels.size(0)
+            if max_batches is not None and batches_processed >= max_batches:
+                break
 
-    return total_loss.item() / len(dataloader.dataset), total_correct.item() / len(dataloader.dataset)
+    if examples_seen == 0:
+        raise ValueError("No evaluation batches were processed.")
+
+    return total_loss.item() / examples_seen, total_correct.item() / examples_seen
 
 def sample_hyperparameters(model, arch_params=False):
     hyp = {}
@@ -368,14 +427,25 @@ def main(args):
         optimizer=hyps['optimizer'],
         arch=args.arch,
         hyps=hyps,
+        max_train_batches=args.max_train_batches,
     )
 
     eval_train_dataset = get_cifar10_dataset(split="eval_train", dataset_dir=args.dataset_dir)
-    train_loss, train_acc = evaluate(model=model, dataset=eval_train_dataset, batch_size=args.eval_batch_size)
+    train_loss, train_acc = evaluate(
+        model=model,
+        dataset=eval_train_dataset,
+        batch_size=args.eval_batch_size,
+        max_batches=args.max_eval_batches,
+    )
     logger.info(f"Train loss: {train_loss}, Train Accuracy: {train_acc}")
 
     eval_dataset = get_cifar10_dataset(split="valid", dataset_dir=args.dataset_dir)
-    eval_loss, eval_acc = evaluate(model=model, dataset=eval_dataset, batch_size=args.eval_batch_size)
+    eval_loss, eval_acc = evaluate(
+        model=model,
+        dataset=eval_dataset,
+        batch_size=args.eval_batch_size,
+        max_batches=args.max_eval_batches,
+    )
     logger.info(f"Evaluation loss: {eval_loss}, Evaluation Accuracy: {eval_acc}")
     
     if args.random_hparams:
