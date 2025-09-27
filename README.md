@@ -15,7 +15,9 @@ We explore the use of large language models (LLMs) in hyperparameter optimizatio
 ### Setup
 1. Install [Ollama](https://ollama.com/download) on the machine running the experiments.
 2. Ensure that the `ollama` CLI is available on your `PATH` (or set the
-   `OLLAMA_EXECUTABLE` environment variable to point to the binary).
+   `OLLAMA_EXECUTABLE` environment variable to point to the binary). The
+   training scripts call the CLI directly so everything runs headlessly
+   without needing to expose an HTTP server.
 3. Pull the model you would like to use for hyper-parameter tuning, for example:
 
    ```
@@ -37,6 +39,7 @@ python train.py [-h] [--random_hparams | --llm] [--rounds ROUNDS] [--search_spac
                 [--train_batch_size TRAIN_BATCH_SIZE] [--eval_batch_size EVAL_BATCH_SIZE]
                 [--learning_rate LEARNING_RATE] [--weight_decay WEIGHT_DECAY] [--label_smoothing LABEL_SMOOTHING]
                 [--optimizer OPTIMIZER] [--num_train_epochs NUM_TRAIN_EPOCHS] [--seed SEED]
+                [--max_train_batches MAX_TRAIN_BATCHES] [--max_eval_batches MAX_EVAL_BATCHES]
 ```
 
 To run the LLM-based hyperparameter search with a single seed:
@@ -53,6 +56,21 @@ python train.py --random_hparams --seed SEED
 This samples randomly from the same default configuration space. To reproduce our results, run the command with 100 different random seeds and then bootstrap to estimate the best error so far.
 
 If neither --llm nor --random_hparams is specified, a training run is performed with hyperparameters specified by the other arguments.
+
+### Quick CIFAR smoke test
+
+To verify the end-to-end pipeline without committing to a full training run,
+limit the number of batches processed during training and evaluation:
+
+```
+python -m cifar.train --dataset_dir ./data --save_dir ./out --arch resnet9 \
+    --num_train_epochs 1 --train_batch_size 512 --eval_batch_size 1024 \
+    --max_train_batches 2 --max_eval_batches 2
+```
+
+This command downloads CIFAR-10 as needed, trains for two batches, and evaluates
+on two batches from both the train and validation splits. It exercises the full
+data pipeline while keeping the runtime well under a minute on CPU-only setups.
 
 ### Trying different architectures
 
